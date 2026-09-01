@@ -192,13 +192,14 @@ async def cb_task_addsrc(bot: Client, query):
         await msg.delete()
         return await _show_task_panel(bot, query, user_id, task_id)
 
-    # Resolve channel
-    chat_id, title = await _resolve_chat(bot, msg)
+    # Resolve channel — try userbot first (for private groups), then bot
+    userbot = temp.USERBOT_CLIENTS.get(user_id)
+    chat_id, title = await _resolve_chat(userbot or bot, msg)
     await msg.delete()
 
     if chat_id is None:
         return await prompt.edit(
-            f"❌ Could not resolve channel: {title}\n\nTry forwarding a message from it.",
+            f"❌ Could not resolve chat: {title}\n\nTry sending a forwarded message, @username, or numeric ID.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩ ʙᴀᴄᴋ", callback_data=f"task_view_{task_id}")]]),
         )
 
@@ -281,12 +282,14 @@ async def cb_task_setdest(bot: Client, query):
         await msg.delete()
         return await _show_task_panel(bot, query, user_id, task_id)
 
-    chat_id, title = await _resolve_chat(bot, msg)
+    # Try userbot first (for private channels/groups), then bot
+    userbot = temp.USERBOT_CLIENTS.get(user_id)
+    chat_id, title = await _resolve_chat(userbot or bot, msg)
     await msg.delete()
 
     if chat_id is None:
         return await prompt.edit(
-            f"❌ Could not resolve channel: {title}",
+            f"❌ Could not resolve chat: {title}\n\nTry sending a forwarded message, @username, or numeric ID.",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("↩ ʙᴀᴄᴋ", callback_data=f"task_view_{task_id}")]]),
         )
 
@@ -313,6 +316,7 @@ async def cb_task_delete(bot: Client, query):
         if not task_obj.done():
             task_obj.cancel()
 
+    await db.set_task_active(user_id, task_id, False)
     await db.delete_task(user_id, task_id)
     await query.answer(f"Task {task_id} deleted.", show_alert=False)
     await cb_tasks_menu(bot, query)
@@ -321,6 +325,22 @@ async def cb_task_delete(bot: Client, query):
 # ─────────────────────────────────────────────────────────────────────────────
 #  Start / stop individual task
 # ─────────────────────────────────────────────────────────────────────────────
+
+async def start_single_task_listener(bot: Client, user_id: int, task_id: int) -> bool:
+    """Helper to start task listener if userbot client is available."""
+    key = _task_key(user_id, task_id)
+    if key in temp.TASK_LISTENERS:
+        return True
+    userbot = temp.USERBOT_CLIENTS.get(user_id)
+    if not userbot:
+        return False
+    is_premium = True
+    loop_task = asyncio.get_event_loop().create_task(
+        _task_listener(bot, user_id, task_id, userbot, is_premium)
+    )
+    temp.TASK_LISTENERS[key] = loop_task
+    return True
+
 
 @Client.on_callback_query(filters.regex(r"^task_start_(\d+)$"))
 async def cb_task_start(bot: Client, query):
@@ -341,8 +361,6 @@ async def cb_task_start(bot: Client, query):
     if key in temp.TASK_LISTENERS:
         return await query.answer("Already running.", show_alert=True)
 
-    # Get userbot client (must already be running via main session)
-    from plugins.forwarder import _handle_message
     userbot = temp.USERBOT_CLIENTS.get(user_id)
     if not userbot:
         return await query.answer(
@@ -350,12 +368,13 @@ async def cb_task_start(bot: Client, query):
             show_alert=True,
         )
 
-    is_premium = True  # ultra is always premium
-    loop_task = asyncio.get_event_loop().create_task(
-        _task_listener(bot, user_id, task_id, userbot, is_premium)
-    )
-    temp.TASK_LISTENERS[key] = loop_task
-    await query.answer(f"Task {task_id} started ✅", show_alert=False)
+    started = await start_single_task_listener(bot, user_id, task_id)
+    if started:
+        await db.set_task_active(user_id, task_id, True)
+        await query.answer(f"Task {task_id} started ✅", show_alert=False)
+    else:
+        await query.answer("Could not start task listener.", show_alert=True)
+
     await _show_task_panel(bot, query, user_id, task_id)
 
 
@@ -371,6 +390,7 @@ async def cb_task_stop(bot: Client, query):
     if task_obj and not task_obj.done():
         task_obj.cancel()
 
+    await db.set_task_active(user_id, task_id, False)
     await query.answer(f"Task {task_id} stopped.", show_alert=False)
     await _show_task_panel(bot, query, user_id, task_id)
 
@@ -382,6 +402,7 @@ async def cb_task_stop(bot: Client, query):
 async def _task_listener(bot_client, user_id: int, task_id: int, userbot, is_premium: bool):
     from plugins.forwarder import _handle_message_for_dest
     from pyrogram import filters as pyro_filters
+    from pyrogram.handlers import MessageHandler
 
     task = await db.get_task(user_id, task_id)
     if not task:
@@ -392,9 +413,11 @@ async def _task_listener(bot_client, user_id: int, task_id: int, userbot, is_pre
 
     logger.info(f"[user {user_id}] Task {task_id} listener starting | sources: {source_ids} → {dest_chat_id}")
 
-    @userbot.on_message(pyro_filters.chat(source_ids))
     async def on_task_message(client, message):
         await _handle_message_for_dest(client, message, bot_client, user_id, is_premium, dest_chat_id)
+
+    handler = MessageHandler(on_task_message, pyro_filters.chat(source_ids))
+    userbot.add_handler(handler)
 
     try:
         while True:
@@ -403,29 +426,34 @@ async def _task_listener(bot_client, user_id: int, task_id: int, userbot, is_pre
         logger.info(f"[user {user_id}] Task {task_id} listener cancelled.")
     finally:
         try:
-            userbot.remove_handler(on_task_message)
-        except Exception:
-            pass
+            userbot.remove_handler(handler)
+        except Exception as e:
+            logger.error(f"Error removing task handler: {e}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Helper: resolve a chat from a message or text
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def _resolve_chat(bot: Client, msg: Message) -> tuple[int | None, str]:
-    """Returns (chat_id, title) or (None, error_msg)."""
-    # Case 1: forwarded from a channel
-    if msg.forward_from_chat:
-        chat = msg.forward_from_chat
-        return chat.id, chat.title or chat.username or str(chat.id)
-
-    # Case 2: text is a username or ID
-    raw = (msg.text or "").strip()
-    if not raw:
-        return None, "No input provided"
-
-    try:
-        chat = await bot.get_chat(raw)
-        return chat.id, chat.title or chat.username or str(chat.id)
-    except Exception as e:
-        return None, str(e)
+async def _resolve_chat(bot: Client, msg: Message) -> tuple:
+    """
+    Universal resolver — delegates to channels._resolve_chat_universal.
+    Tries userbot first (for private groups/channels), then falls back to bot.
+    """
+    from plugins.channels import _resolve_chat_universal
+    # Try with bot client first
+    result = await _resolve_chat_universal(bot, msg)
+    if result[0] is not None:
+        return result
+    # Also attempt with the userbot for the sender if it's running
+    user_id = msg.from_user.id if msg.from_user else None
+    if user_id:
+        userbot = temp.USERBOT_CLIENTS.get(user_id)
+        if userbot:
+            try:
+                result2 = await _resolve_chat_universal(userbot, msg)
+                if result2[0] is not None:
+                    return result2
+            except Exception:
+                pass
+    return result  # return the (None, error) from the bot attempt

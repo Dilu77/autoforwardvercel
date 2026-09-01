@@ -153,31 +153,33 @@ async def cb_main_menu(bot: Client, query):
 # ─────────────────────────────────────────────────────────────────────────────
 
 PLANS_TEXT = (
-    "💎 <b>𝙿𝚕𝚊𝚗𝚜 &amp; 𝙿𝚛𝚒𝚌𝚒𝚗𝚐</b>\n\n"
+    "💎 <b>𝙿𝚕𝚊𝚗𝚜 &amp; 𝙿𝚛𝚒𝚌𝚒𝚗𝚐 (𝚄𝚂𝙳)</b>\n\n"
     "━━━━━━━━━━━━━━━━━━━\n"
-    "🆓 <b>Free</b>\n"
-    "  • Live forwarding\n"
-    "  • 1 source → 1 destination\n"
+    "🆓 <b>Free Plan — $0.00 / month</b>\n"
+    "  • Live forwarding (1 source → 1 dest)\n"
     f"  • {Config.FREE_PLAN_DELAY}s start delay\n"
     "  • Watermark on all messages\n"
-    "  • Media filters\n\n"
+    "  • Basic media type filters\n\n"
     "━━━━━━━━━━━━━━━━━━━\n"
-    "🌟 <b>Premium</b>\n"
-    "  • No watermark\n"
-    "  • No start delay\n"
-    "  • Custom captions\n"
-    "  • Forward tag toggle\n"
-    "  • Remove caption\n"
-    "  • Text replace rules\n"
-    "  • All media filters\n\n"
+    "🌟 <b>Premium Plan — $2.99 / month</b>\n"
+    "  • Instant forwarding (No delay)\n"
+    "  • No watermark (Clean forwarding)\n"
+    "  • Custom captions ({caption}, {filename}, {size})\n"
+    "  • Custom inline buttons & URLs\n"
+    "  • File size limits & Extension blacklist\n"
+    "  • Keyword whitelist & Text replace rules\n"
+    "  • Protect content & Duplicate skipping\n"
+    "  • Unequify duplicate message cleaner\n"
+    "  • Auto-resume on server restart\n\n"
     "━━━━━━━━━━━━━━━━━━━\n"
-    "💎 <b>Premium Ultra</b>\n"
-    "  • Everything in Premium\n"
-    "  • Multi-task forwarding\n"
-    f"  • Up to {Config.MAX_ULTRA_TASKS} tasks (each with own sources → dest)\n"
-    "  • Priority support\n\n"
+    "💎 <b>Premium Ultra Plan — $5.99 / month</b>\n"
+    "  • Everything included in Premium\n"
+    "  • Multi-Task forwarding\n"
+    f"  • Up to {Config.MAX_ULTRA_TASKS} independent tasks\n"
+    "  • Separate sources & destination per task\n"
+    "  • Priority VIP support\n\n"
     "━━━━━━━━━━━━━━━━━━━\n"
-    "📩 Contact admin to upgrade."
+    "📩 <b>To upgrade, contact the bot admin!</b>"
 )
 
 HELP_TEXT = (
@@ -452,3 +454,47 @@ async def cb_status(bot: Client, query):
             [[InlineKeyboardButton("↩ ʙᴀᴄᴋ", callback_data="menu_live_forward")]]
         ),
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Text Commands (/settings, /help, /reset)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@Client.on_message(filters.private & filters.command("settings"))
+async def cmd_settings(bot: Client, message: Message):
+    user_id = message.from_user.id
+    if not await db.is_user_exist(user_id):
+        await db.add_user(user_id, message.from_user.first_name)
+    await message.reply_text(
+        "⚙️ <b>𝚂𝚎𝚝𝚝𝚒𝚗𝚐𝚜 𝙷𝚞𝚋</b>\n\n"
+        "𝙲𝚘𝚗𝚏𝚒𝚐𝚞𝚛𝚎 𝚢𝚘𝚞𝚛 𝚊𝚞𝚝𝚑𝚎𝚗𝚝𝚒𝚌𝚊ᴛ𝚒𝚘𝚗, 𝚜𝚘𝚞𝚛𝚌𝚎/𝚍𝚎𝚜𝚝𝚒𝚗𝚊𝚝𝚒𝚘𝚗 𝚌𝚑𝚊𝚗𝚗𝚎𝚕𝚜, 𝚊𝚗𝚍 𝚏𝚘𝚛𝚠𝚊𝚛𝚍𝚒𝚗𝚐 𝚛𝚞𝚕𝚎𝚜.",
+        reply_markup=await settings_hub_keyboard(user_id)
+    )
+
+
+@Client.on_message(filters.private & filters.command("help"))
+async def cmd_help(bot: Client, message: Message):
+    user_id = message.from_user.id
+    if not await db.is_user_exist(user_id):
+        await db.add_user(user_id, message.from_user.first_name)
+    await message.reply_text(
+        HELP_TEXT,
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🏠 ᴍᴇɴᴜ", callback_data="main_menu")]
+        ]),
+    )
+
+
+@Client.on_message(filters.private & filters.command("reset"))
+async def cmd_reset(bot: Client, message: Message):
+    user_id = message.from_user.id
+    if not await db.is_user_exist(user_id):
+        await db.add_user(user_id, message.from_user.first_name)
+    
+    # Reset user config in database
+    await db.settings.update_one(
+        {"user_id": int(user_id)},
+        {"$set": {"config": db._DEFAULT_SETTINGS}},
+        upsert=True
+    )
+    await message.reply_text("✅ 𝚂𝚎𝚝𝚝𝚒𝚗𝚐𝚜 𝚜𝚞𝚌𝚌𝚎𝚜𝚜𝚏𝚞𝚕𝚕𝚢 𝚛𝚎𝚜𝚎𝚝 𝚝𝚘 𝚍𝚎𝚏𝚊𝚞𝚕𝚝𝚜!")

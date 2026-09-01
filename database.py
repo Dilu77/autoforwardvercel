@@ -5,12 +5,19 @@ from pymongo import MongoClient
 
 def mongodb_version():
     x = MongoClient(Config.DATABASE_URI)
-    return x.server_info()["version"]
+    ver = x.server_info()["version"]
+    x.close()
+    return ver
 
 
 class Database:
     def __init__(self, uri: str, db_name: str):
-        self._client = motor.motor_asyncio.AsyncIOMotorClient(uri)
+        self._client = motor.motor_asyncio.AsyncIOMotorClient(
+            uri,
+            maxPoolSize=10,
+            minPoolSize=1,
+            maxIdleTimeMS=30000,
+        )
         self.db      = self._client[db_name]
 
         # collections
@@ -20,6 +27,7 @@ class Database:
         self.sources  = self.db.sources      # source chat_ids per user
         self.settings = self.db.settings     # per-user forwarding settings
         self.premium  = self.db.premium      # premium user records
+        self.duplicates = self.db.duplicates  # duplicate message detection
 
     # ── helpers ───────────────────────────────────────────────────────────────
 
@@ -163,6 +171,14 @@ class Database:
         "is_active":   False,
         # list of {"keyword": str, "replace_with": str}
         "replace_rules": [],
+        "button": None,
+        "file_size": 0,
+        "size_limit": None,
+        "extensions": [],
+        "keywords": [],
+        "protect_content": False,
+        "duplicate_skip": True,
+        "db_uri": None,
     }
 
     async def get_settings(self, user_id: int) -> dict:
@@ -175,6 +191,10 @@ class Database:
                                   **merged.get("filters", {})}
             if "replace_rules" not in merged:
                 merged["replace_rules"] = []
+            if "extensions" not in merged:
+                merged["extensions"] = []
+            if "keywords" not in merged:
+                merged["keywords"] = []
             return merged
         return dict(self._DEFAULT_SETTINGS)
 
@@ -326,6 +346,53 @@ class Database:
             {"$set": {"sources": new}},
         )
         return True
+
+    async def set_task_active(self, user_id: int, task_id: int, active: bool):
+        if not hasattr(self, "tasks"):
+            self.tasks = self.db.tasks
+        await self.tasks.update_one(
+            {"user_id": int(user_id), "task_id": task_id},
+            {"$set": {"is_active": active}},
+        )
+
+    async def get_active_tasks(self, user_id: int) -> list[dict]:
+        if not hasattr(self, "tasks"):
+            self.tasks = self.db.tasks
+        cursor = self.tasks.find({"user_id": int(user_id), "is_active": True})
+        return [doc async for doc in cursor]
+
+    async def get_users_with_active_tasks(self) -> list[int]:
+        if not hasattr(self, "tasks"):
+            self.tasks = self.db.tasks
+        cursor = self.tasks.find({"is_active": True})
+        user_ids = set()
+        async for doc in cursor:
+            if "user_id" in doc:
+                user_ids.add(int(doc["user_id"]))
+        return list(user_ids)
+
+
+    # ── duplicate check helpers ────────────────────────────────────────────────
+    async def is_duplicate(self, user_id: int, dest_chat_id: int, identifier: str) -> bool:
+        doc = await self.duplicates.find_one({
+            "user_id": int(user_id),
+            "dest_chat_id": int(dest_chat_id),
+            "identifier": identifier
+        })
+        return doc is not None
+
+    async def add_duplicate(self, user_id: int, dest_chat_id: int, identifier: str):
+        await self.duplicates.insert_one({
+            "user_id": int(user_id),
+            "dest_chat_id": int(dest_chat_id),
+            "identifier": identifier
+        })
+
+    async def clear_duplicates(self, user_id: int, dest_chat_id: int):
+        await self.duplicates.delete_many({
+            "user_id": int(user_id),
+            "dest_chat_id": int(dest_chat_id)
+        })
 
 
 db = Database(Config.DATABASE_URI, Config.DATABASE_NAME)

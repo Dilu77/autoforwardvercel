@@ -20,7 +20,7 @@ class Bot(Client):
             api_hash=Config.API_HASH,
             api_id=Config.API_ID,
             plugins={"root": "plugins"},
-            workers=50,
+            workers=4,
             bot_token=Config.BOT_TOKEN,
         )
         self.log = logging
@@ -37,31 +37,53 @@ class Bot(Client):
             f"{me.first_name} started | pyrogram v{__version__} (Layer {layer}) | @{me.username}"
         )
 
-        # ── Re-launch userbot listeners for users who were active before restart
-        active_user_ids = await db.get_active_users()
-        if active_user_ids:
+        # ── Re-launch userbot listeners for premium & owner users who were active before restart.
+        # Free plan users are stopped on restart and must start manually.
+        main_active = await db.get_active_users()
+        task_active = await db.get_users_with_active_tasks()
+        resumable_user_ids = sorted(list(set(main_active + task_active)))
+
+        if resumable_user_ids:
             logging.info(
-                f"Auto-resuming listeners for {len(active_user_ids)} user(s)..."
+                f"Processing restart auto-resume for {len(resumable_user_ids)} user(s)..."
             )
-            for user_id in active_user_ids:
-                try:
-                    from plugins.forwarder import launch_userbot
-                    await launch_userbot(self, user_id)
-                    await self.send_message(
-                        user_id,
-                        "♻️ <b>Bot restarted.</b> Your live forwarding has been automatically resumed!",
-                    )
-                except Exception as e:
-                    logging.warning(f"Could not resume listener for {user_id}: {e}")
+            for user_id in resumable_user_ids:
+                is_prem = await db.is_premium(user_id)
+                if not is_prem:
+                    # Free plan: stop active state on restart
                     await db.set_active(user_id, False)
+                    tasks = await db.get_active_tasks(user_id)
+                    for t in tasks:
+                        await db.set_task_active(user_id, t["task_id"], False)
                     try:
                         await self.send_message(
                             user_id,
-                            "⚠️ <b>Bot restarted</b> but your forwarding session could not be resumed.\n"
-                            "Please use /start → <b>▶️ Start Forwarding</b> again.",
+                            "⚠️ <b>Bot restarted.</b> Free plan live forwarding is paused after a server restart.\n"
+                            "Please tap <b>▶️ Start Forwarding</b> in /start to resume manually.",
                         )
                     except Exception:
                         pass
+                else:
+                    # Premium / Ultra / Owner: auto-resume forwarding session & multi-tasks
+                    try:
+                        from plugins.forwarder import launch_userbot
+                        res = await launch_userbot(self, user_id)
+                        if res is None:
+                            await self.send_message(
+                                user_id,
+                                "♻️ <b>Bot restarted.</b> Your premium live forwarding and multi-task sessions have been automatically resumed!",
+                            )
+                    except Exception as e:
+                        logging.warning(f"Could not resume listener for {user_id}: {e}")
+                        await db.set_active(user_id, False)
+                        try:
+                            await self.send_message(
+                                user_id,
+                                "⚠️ <b>Bot restarted</b> but your forwarding session could not be resumed.\n"
+                                "Please use /start → <b>▶️ Start Forwarding</b> again.",
+                            )
+                        except Exception:
+                            pass
 
     async def stop(self, *args):
         logging.info(f"@{self.username} stopped.")

@@ -114,6 +114,12 @@ async def cb_rep_add(bot: Client, query):
             reply_markup=InlineKeyboardMarkup(_BACK),
         )
 
+    if len(keyword) > 30:
+        return await prompt.edit(
+            "⚠️ 𝙺𝚎𝚢𝚠𝚘𝚛𝚍 𝚌𝚊𝚗𝚗𝚘𝚝 𝚋𝚎 𝚕𝚘𝚗𝚐𝚎𝚛 𝚝𝚑𝚊𝚗 𝟹𝟶 𝚌𝚑𝚊𝚛𝚊𝚌𝚝𝚎𝚛𝚜.",
+            reply_markup=InlineKeyboardMarkup(_BACK),
+        )
+
     await prompt.edit(
         f"➕ <b>𝙰𝚍𝚍 𝚁𝚎𝚙𝚕𝚊𝚌𝚎 𝚁𝚞𝚕𝚎 — 𝚂𝚝𝚎𝚙 𝟸/𝟸</b>\n\n"
         f"𝙺𝚎𝚢𝚠𝚘𝚛𝚍: <code>{keyword}</code>\n\n"

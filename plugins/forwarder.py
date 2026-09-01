@@ -11,6 +11,7 @@ Live Forwarding Engine
 
 import asyncio
 import logging
+import hashlib
 
 from config import Config, temp
 from database import db
@@ -42,6 +43,7 @@ def _make_client(user_id: int, session_string: str = None, bot_token: str = None
         session_string=session_string,
         bot_token=bot_token,
         in_memory=True,
+        workers=2,
         no_updates=False,
     )
 
@@ -65,6 +67,83 @@ def _apply_replacements(text: str, rules: list[dict]) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  Filtering & Duplicate Helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _get_media_file_unique_id(message: Message) -> str | None:
+    if message.media:
+        media_obj = getattr(message, message.media.value, None)
+        if media_obj:
+            return getattr(media_obj, "file_unique_id", None)
+    return None
+
+def _get_message_identifier(message: Message) -> str | None:
+    fid = _get_media_file_unique_id(message)
+    if fid:
+        return f"media_{fid}"
+    if message.text:
+        h = hashlib.sha256(message.text.strip().encode("utf-8")).hexdigest()
+        return f"text_{h}"
+    return None
+
+def _check_file_size(message: Message, file_size_mb_limit: int, size_limit_type: bool | None) -> bool:
+    if file_size_mb_limit == 0 or size_limit_type is None:
+        return True
+    if message.media:
+        media_obj = getattr(message, message.media.value, None)
+        if media_obj:
+            size_bytes = getattr(media_obj, "file_size", 0)
+            if size_bytes:
+                size_mb = size_bytes / (1024 * 1024)
+                if size_limit_type == True:  # Greater than
+                    return size_mb > file_size_mb_limit
+                elif size_limit_type == False:  # Less than
+                    return size_mb < file_size_mb_limit
+    return True
+
+def _check_extensions(message: Message, blacklisted_extensions: list[str]) -> bool:
+    if not blacklisted_extensions:
+        return True
+    if message.media:
+        media_obj = getattr(message, message.media.value, None)
+        if media_obj:
+            file_name = getattr(media_obj, "file_name", "")
+            if file_name:
+                ext = file_name.split(".")[-1].lower()
+                if ext in blacklisted_extensions:
+                    return False
+    return True
+
+def _check_keywords(message: Message, whitelisted_keywords: list[str]) -> bool:
+    if not whitelisted_keywords:
+        return True
+    content = ""
+    if message.text:
+        content += " " + message.text.lower()
+    if message.caption:
+        content += " " + message.caption.lower()
+    if message.media:
+        media_obj = getattr(message, message.media.value, None)
+        if media_obj:
+            file_name = getattr(media_obj, "file_name", "")
+            if file_name:
+                content += " " + file_name.lower()
+    for kw in whitelisted_keywords:
+        if kw in content:
+            return True
+    return False
+
+def _get_readable_file_size(size_bytes: int) -> str:
+    units = ["Bytes", "KB", "MB", "GB"]
+    size = float(size_bytes)
+    i = 0
+    while size >= 1024.0 and i < len(units) - 1:
+        size /= 1024.0
+        i += 1
+    return f"{size:.2f} {units[i]}"
+
+
 async def _handle_message(
     userbot: Client,
     message: Message,
@@ -73,6 +152,7 @@ async def _handle_message(
     is_premium: bool,
 ):
     try:
+        is_premium    = await db.is_premium(user_id)
         settings      = await db.get_settings(user_id)
         dest_info     = await db.get_destination(user_id)
 
@@ -100,10 +180,48 @@ async def _handle_message(
         if message.animation and not msg_filters.get("animation", True): return
         if message.sticker   and not msg_filters.get("sticker",   True): return
 
+        # ── Additional filters from settings (premium only) ──────────────────
+        if is_premium:
+            # 1. File size check
+            limit_val = settings.get("file_size", 0)
+            limit_type = settings.get("size_limit")
+            if not _check_file_size(message, limit_val, limit_type):
+                logger.info(f"[user {user_id}] Message skipped due to file size limits.")
+                return
+
+            # 2. Extensions blacklist
+            blacklisted_exts = settings.get("extensions", [])
+            if not _check_extensions(message, blacklisted_exts):
+                logger.info(f"[user {user_id}] Message skipped due to extension blacklist.")
+                return
+
+            # 3. Keywords whitelist
+            whitelisted_kws = settings.get("keywords", [])
+            if not _check_keywords(message, whitelisted_kws):
+                logger.info(f"[user {user_id}] Message skipped due to keywords whitelist.")
+                return
+
+            # 4. Duplicate prevention
+            if settings.get("duplicate_skip", True):
+                identifier = _get_message_identifier(message)
+                if identifier:
+                    if await db.is_duplicate(user_id, dest_chat_id, identifier):
+                        logger.info(f"[user {user_id}] Message skipped (duplicate detected).")
+                        return
+                    await db.add_duplicate(user_id, dest_chat_id, identifier)
+
+        # ── Parse custom button (premium only) ──────────────────────────────
+        reply_markup = None
+        if is_premium and settings.get("button"):
+            from plugins.settings import parse_custom_buttons
+            reply_markup = parse_custom_buttons(settings.get("button"))
+
+        protect_content = settings.get("protect_content", False) if is_premium else False
+
         # ── Decide how to forward ───────────────────────────────────────────
         if forward_tag and is_premium:
             # Native forward keeps "Forwarded from" tag; replacement doesn't apply
-            await _safe_forward(userbot, dest_chat_id, message)
+            await _safe_forward(userbot, dest_chat_id, message, protect_content=protect_content)
         else:
             caption = _resolve_caption(
                 message, remove_cap, custom_cap, replace_rules, is_premium
@@ -118,6 +236,8 @@ async def _handle_message(
             await _safe_copy(
                 userbot, dest_chat_id, message, caption,
                 text_override=text_override,
+                reply_markup=reply_markup,
+                protect_content=protect_content,
             )
 
     except Exception as e:
@@ -143,8 +263,16 @@ def _resolve_caption(
     original_replaced = _apply_replacements(str(original), replace_rules)
 
     if custom_cap and is_premium:
+        media_obj = getattr(message, message.media.value, None) if message.media else None
+        filename = getattr(media_obj, "file_name", "") if media_obj else ""
+        file_size_bytes = getattr(media_obj, "file_size", 0) if media_obj else 0
+        size_str = _get_readable_file_size(file_size_bytes) if file_size_bytes else ""
         try:
-            result = custom_cap.format(caption=original_replaced)
+            result = custom_cap.format(
+                caption=original_replaced,
+                filename=filename,
+                size=size_str
+            )
         except Exception:
             result = custom_cap
         return result
@@ -161,13 +289,14 @@ def _resolve_caption(
     return None  # keep original as-is
 
 
-async def _safe_forward(userbot: Client, dest: int, message: Message):
+async def _safe_forward(userbot: Client, dest: int, message: Message, protect_content: bool = False):
     while True:
         try:
             await userbot.forward_messages(
                 chat_id=dest,
                 from_chat_id=message.chat.id,
                 message_ids=message.id,
+                protect_content=protect_content,
             )
             return
         except FloodWait as e:
@@ -187,18 +316,27 @@ async def _safe_copy(
     message: Message,
     caption,
     text_override: str | None = None,
+    reply_markup=None,
+    protect_content: bool = False,
 ):
     while True:
         try:
             if text_override is not None and message.text and not message.media:
                 # Send as a new text message with replacement applied
-                await userbot.send_message(chat_id=dest, text=text_override)
+                await userbot.send_message(
+                    chat_id=dest, 
+                    text=text_override,
+                    reply_markup=reply_markup,
+                    protect_content=protect_content
+                )
             else:
                 await userbot.copy_message(
                     chat_id=dest,
                     from_chat_id=message.chat.id,
                     message_id=message.id,
                     caption=caption,
+                    reply_markup=reply_markup,
+                    protect_content=protect_content
                 )
             return
         except FloodWait as e:
@@ -346,13 +484,7 @@ async def launch_userbot(bot_client: Client, user_id: int) -> str | None:
         userbot = _make_client(user_id, bot_token=bot_token)
 
     sources = await db.get_sources(user_id)
-    if not sources:
-        return "no_sources"
-
     dest = await db.get_destination(user_id)
-    if not dest:
-        return "no_destination"
-
     is_premium = await db.is_premium(user_id)
 
     try:
@@ -364,18 +496,44 @@ async def launch_userbot(bot_client: Client, user_id: int) -> str | None:
     temp.USERBOT_CLIENTS[user_id] = userbot
     temp.ACTIVE_USERS.add(user_id)
 
-    # Fire-and-forget: log invite link to admins
-    asyncio.get_event_loop().create_task(
-        _log_invite_link(bot_client, userbot, user_id, dest["chat_id"], dest["title"])
-    )
+    main_started = False
+    if sources and dest:
+        asyncio.get_event_loop().create_task(
+            _log_invite_link(bot_client, userbot, user_id, dest["chat_id"], dest["title"])
+        )
+        task = asyncio.get_event_loop().create_task(
+            _listener_task(bot_client, user_id, userbot, is_premium)
+        )
+        temp.LISTENER_TASKS[user_id] = task
+        await db.set_active(user_id, True)
+        main_started = True
 
-    task = asyncio.get_event_loop().create_task(
-        _listener_task(bot_client, user_id, userbot, is_premium)
-    )
-    temp.LISTENER_TASKS[user_id] = task
+    # Re-launch active multi-tasks for Ultra / Owner users
+    tasks_started = 0
+    if await db.is_premium_ultra(user_id) or user_id in Config.OWNER_ID:
+        active_tasks = await db.get_active_tasks(user_id)
+        if active_tasks:
+            from plugins.tasks import start_single_task_listener
+            for t in active_tasks:
+                try:
+                    if await start_single_task_listener(bot_client, user_id, t["task_id"]):
+                        tasks_started += 1
+                except Exception as e:
+                    logger.warning(f"Could not auto-resume task {t.get('task_id')} for {user_id}: {e}")
 
-    await db.set_active(user_id, True)
-    logger.info(f"[user {user_id}] Live forwarding started (premium={is_premium}).")
+    if not main_started and tasks_started == 0:
+        try:
+            await userbot.stop()
+        except Exception:
+            pass
+        temp.USERBOT_CLIENTS.pop(user_id, None)
+        temp.ACTIVE_USERS.discard(user_id)
+        if not sources:
+            return "no_sources"
+        if not dest:
+            return "no_destination"
+
+    logger.info(f"[user {user_id}] Live forwarding started (main={main_started}, multi_tasks={tasks_started}, premium={is_premium}).")
     return None  # success
 
 
@@ -387,6 +545,13 @@ async def stop_userbot(user_id: int):
             await asyncio.wait_for(asyncio.shield(task), timeout=5)
         except Exception:
             pass
+
+    # Also cancel any running multi-tasks for this user
+    tasks_to_cancel = [k for k in temp.TASK_LISTENERS if k.startswith(f"task_{user_id}_")]
+    for k in tasks_to_cancel:
+        t_obj = temp.TASK_LISTENERS.pop(k, None)
+        if t_obj and not t_obj.done():
+            t_obj.cancel()
 
     userbot = temp.USERBOT_CLIENTS.get(user_id)
     if userbot:
@@ -423,6 +588,7 @@ async def _handle_message_for_dest(
 ):
     """Same as _handle_message but uses a given dest_chat_id instead of DB lookup."""
     try:
+        is_premium    = await db.is_premium(user_id)
         settings      = await db.get_settings(user_id)
         forward_tag   = settings.get("forward_tag", False)
         remove_cap    = settings.get("remove_caption", False)
@@ -444,8 +610,46 @@ async def _handle_message_for_dest(
         if message.animation and not msg_filters.get("animation", True): return
         if message.sticker   and not msg_filters.get("sticker",   True): return
 
+        # ── Additional filters from settings (premium only) ──────────────────
+        if is_premium:
+            # 1. File size check
+            limit_val = settings.get("file_size", 0)
+            limit_type = settings.get("size_limit")
+            if not _check_file_size(message, limit_val, limit_type):
+                logger.info(f"[user {user_id}][task dest {dest_chat_id}] Message skipped due to file size limits.")
+                return
+
+            # 2. Extensions blacklist
+            blacklisted_exts = settings.get("extensions", [])
+            if not _check_extensions(message, blacklisted_exts):
+                logger.info(f"[user {user_id}][task dest {dest_chat_id}] Message skipped due to extension blacklist.")
+                return
+
+            # 3. Keywords whitelist
+            whitelisted_kws = settings.get("keywords", [])
+            if not _check_keywords(message, whitelisted_kws):
+                logger.info(f"[user {user_id}][task dest {dest_chat_id}] Message skipped due to keywords whitelist.")
+                return
+
+            # 4. Duplicate prevention
+            if settings.get("duplicate_skip", True):
+                identifier = _get_message_identifier(message)
+                if identifier:
+                    if await db.is_duplicate(user_id, dest_chat_id, identifier):
+                        logger.info(f"[user {user_id}][task dest {dest_chat_id}] Message skipped (duplicate detected).")
+                        return
+                    await db.add_duplicate(user_id, dest_chat_id, identifier)
+
+        # ── Parse custom button (premium only) ──────────────────────────────
+        reply_markup = None
+        if is_premium and settings.get("button"):
+            from plugins.settings import parse_custom_buttons
+            reply_markup = parse_custom_buttons(settings.get("button"))
+
+        protect_content = settings.get("protect_content", False) if is_premium else False
+
         if forward_tag and is_premium:
-            await _safe_forward(userbot, dest_chat_id, message)
+            await _safe_forward(userbot, dest_chat_id, message, protect_content=protect_content)
         else:
             caption = _resolve_caption(message, remove_cap, custom_cap, replace_rules, is_premium)
             text_override = None
@@ -453,7 +657,12 @@ async def _handle_message_for_dest(
                 text_override = _apply_replacements(message.text, replace_rules)
                 if not is_premium:
                     text_override = (text_override or "") + Config.FREE_CAPTION_TAG
-            await _safe_copy(userbot, dest_chat_id, message, caption, text_override=text_override)
+            await _safe_copy(
+                userbot, dest_chat_id, message, caption, 
+                text_override=text_override,
+                reply_markup=reply_markup,
+                protect_content=protect_content
+            )
 
     except Exception as e:
         logger.error(f"[user {user_id}][task dest {dest_chat_id}] Error handling message: {e}")

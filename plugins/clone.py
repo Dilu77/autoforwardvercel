@@ -25,7 +25,7 @@ async def cb_clone_start(bot: Client, query):
         return await query.answer("⚠️ You already have a history forwarding task running in the background. Please wait for it to complete.", show_alert=True)
     
     await query.answer()
-    await _start_clone_wizard(bot, user_id, query.message.chat.id)
+    await _start_clone_wizard(bot, user_id, query)
 
 @Client.on_callback_query(filters.regex(r"^clone_cancel$"))
 async def cb_clone_cancel(bot: Client, query):
@@ -33,21 +33,27 @@ async def cb_clone_cancel(bot: Client, query):
     _PENDING_CLONE.pop(user_id, None)
     await query.message.edit_text("❌ Forwarding process cancelled.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 ᴍᴇɴᴜ", callback_data="main_menu")]]))
 
-async def _start_clone_wizard(bot: Client, user_id: int, chat_id: int):
+async def _start_clone_wizard(bot: Client, user_id: int, query):
+    chat_id = query.message.chat.id
     if user_id in _PENDING_CLONE:
-        return await bot.send_message(chat_id, "⚠️ You are already setting up a forwarding task. Use /cancel to reset.")
+        return await query.message.edit_text(
+            "⚠️ You are already setting up a forwarding task. Use /cancel to reset.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 ᴍᴇɴᴜ", callback_data="main_menu")]])
+        )
 
     _PENDING_CLONE[user_id] = {}
 
     dest_info = await db.get_destination(user_id)
     if not dest_info:
         _PENDING_CLONE.pop(user_id, None)
-        return await bot.send_message(chat_id, "❌ Please set a destination channel first in the settings menu.")
+        return await query.message.edit_text(
+            "❌ Please set a destination channel first in the settings menu.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏠 ᴍᴇɴᴜ", callback_data="main_menu")]])
+        )
     
     dest_chat_id = dest_info["chat_id"]
 
-    prompt = await bot.send_message(
-        chat_id,
+    prompt = await query.message.edit_text(
         "🗄️ **Forward Old Messages Wizard**\n\n"
         f"**Destination:** {dest_info['title']}\n\n"
         "Please send the **link to the FIRST message** you want to start forwarding from.\n"

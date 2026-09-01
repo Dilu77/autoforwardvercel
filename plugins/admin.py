@@ -435,7 +435,7 @@ async def cb_admin_affiliate_menu(bot: Client, query):
     ])
     
     await query.message.edit_text(
-        f"🛒 <b>𝙰𝚏𝚏𝚒𝚕𝚒𝚊𝚝𝚎 𝚂𝚎𝚝𝚝𝚒𝚗settings</b>\n\n"
+        f"🛒 <b>𝙰𝚏𝚏𝚒𝚕𝚒𝚊𝚝𝚎 𝚂𝚎𝚝𝚝𝚒𝚗𝚐𝚜</b>\n\n"
         f"• <b>𝙰𝚞𝚝𝚘-𝚁𝚎𝚠𝚛𝚒𝚝𝚎:</b> {enabled_status}\n"
         f"• <b>𝙰𝚖𝚊𝚣𝚘𝚗 𝚃𝚊𝚐:</b> <code>{tag}</code>\n"
         f"• <b>𝙱𝚕𝚊𝚌𝚔𝚕𝚒𝚜𝚝 𝙸𝚝𝚎𝚖𝚜:</b> {blacklist_count}",
