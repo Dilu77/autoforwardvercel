@@ -508,9 +508,9 @@ async def launch_userbot(bot_client: Client, user_id: int) -> str | None:
         await db.set_active(user_id, True)
         main_started = True
 
-    # Re-launch active multi-tasks for Ultra / Owner users
+    # Re-launch active multi-tasks specifically for Owner users
     tasks_started = 0
-    if await db.is_premium_ultra(user_id) or user_id in Config.OWNER_ID:
+    if user_id in Config.OWNER_ID:
         active_tasks = await db.get_active_tasks(user_id)
         if active_tasks:
             from plugins.tasks import start_single_task_listener

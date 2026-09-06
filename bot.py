@@ -37,19 +37,22 @@ class Bot(Client):
             f"{me.first_name} started | pyrogram v{__version__} (Layer {layer}) | @{me.username}"
         )
 
-        # ── Re-launch userbot listeners for premium & owner users who were active before restart.
-        # Free plan users are stopped on restart and must start manually.
+        # ── Re-launch userbot listeners for owners & premium users
+        # For multi-tasks, only Owner users (in Config.OWNER_ID) are auto-resumed on restart.
         main_active = await db.get_active_users()
         task_active = await db.get_users_with_active_tasks()
-        resumable_user_ids = sorted(list(set(main_active + task_active)))
+        
+        # Non-owners only auto-resume main forwarding if premium; owner auto-resumes both main & multi-tasks.
+        resumable_user_ids = sorted(list(set(main_active + [u for u in task_active if u in Config.OWNER_ID])))
 
         if resumable_user_ids:
             logging.info(
                 f"Processing restart auto-resume for {len(resumable_user_ids)} user(s)..."
             )
             for user_id in resumable_user_ids:
+                is_owner = user_id in Config.OWNER_ID
                 is_prem = await db.is_premium(user_id)
-                if not is_prem:
+                if not is_prem and not is_owner:
                     # Free plan: stop active state on restart
                     await db.set_active(user_id, False)
                     tasks = await db.get_active_tasks(user_id)
@@ -64,14 +67,14 @@ class Bot(Client):
                     except Exception:
                         pass
                 else:
-                    # Premium / Ultra / Owner: auto-resume forwarding session & multi-tasks
+                    # Premium / Owner: auto-resume forwarding session & multi-tasks (for owner)
                     try:
                         from plugins.forwarder import launch_userbot
                         res = await launch_userbot(self, user_id)
                         if res is None:
                             await self.send_message(
                                 user_id,
-                                "♻️ <b>Bot restarted.</b> Your premium live forwarding and multi-task sessions have been automatically resumed!",
+                                "♻️ <b>Bot restarted.</b> Your live forwarding session has been automatically resumed!",
                             )
                     except Exception as e:
                         logging.warning(f"Could not resume listener for {user_id}: {e}")

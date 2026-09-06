@@ -363,10 +363,14 @@ async def cb_task_start(bot: Client, query):
 
     userbot = temp.USERBOT_CLIENTS.get(user_id)
     if not userbot:
-        return await query.answer(
-            "Start main forwarding first (your userbot must be active).",
-            show_alert=True,
-        )
+        from plugins.forwarder import launch_userbot
+        await launch_userbot(bot, user_id)
+        userbot = temp.USERBOT_CLIENTS.get(user_id)
+        if not userbot:
+            return await query.answer(
+                "Could not start session client. Please add a session string or bot token first.",
+                show_alert=True,
+            )
 
     started = await start_single_task_listener(bot, user_id, task_id)
     if started:
